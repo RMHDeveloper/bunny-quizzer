@@ -14,49 +14,57 @@ function apiDevServer(): Plugin {
         const url = req.url || '';
         if (!url.startsWith('/api/generate')) return next();
 
-        (async () => {
+        const fail = (message: string) => {
           try {
-            const chunks: Buffer[] = [];
-            for await (const chunk of req) chunks.push(chunk as Buffer);
-
-            const headers: Record<string, string> = {};
-            for (const [k, v] of Object.entries(req.headers)) {
-              if (typeof v === 'string') headers[k] = v;
-              else if (Array.isArray(v)) headers[k] = v.join(', ');
+            if (!res.headersSent) {
+              res.statusCode = 500;
+              res.setHeader('content-type', 'application/json');
             }
+            res.end(JSON.stringify({ error: `Dev API error: ${message}` }));
+          } catch {
+            /* connection already gone */
+          }
+        };
 
-            const request = new Request(`http://localhost${url}`, {
-              method: req.method || 'GET',
-              headers,
-              body: chunks.length ? Buffer.concat(chunks) : undefined,
-            });
+        (async () => {
+          const chunks: Buffer[] = [];
+          for await (const chunk of req) chunks.push(chunk as Buffer);
 
-            const mod = await server.ssrLoadModule('/api/generate.ts');
-            const handler = mod.default as (r: Request) => Promise<Response>;
-            const response = await handler(request);
+          const headers: Record<string, string> = {};
+          for (const [k, v] of Object.entries(req.headers)) {
+            if (typeof v === 'string') headers[k] = v;
+            else if (Array.isArray(v)) headers[k] = v.join(', ');
+          }
 
-            res.statusCode = response.status;
-            response.headers.forEach((value, key) => res.setHeader(key, value));
+          const request = new Request(`http://localhost${url}`, {
+            method: req.method || 'GET',
+            headers,
+            body: chunks.length ? Buffer.concat(chunks) : undefined,
+          });
 
-            if (response.body) {
-              const reader = response.body.getReader();
+          const mod = await server.ssrLoadModule('/api/generate.ts');
+          const handler = mod.default as (r: Request) => Promise<Response>;
+          const response = await handler(request);
+
+          res.statusCode = response.status;
+          response.headers.forEach((value, key) => res.setHeader(key, value));
+
+          if (response.body) {
+            const reader = response.body.getReader();
+            try {
               for (;;) {
                 const { done, value } = await reader.read();
                 if (done) break;
-                res.write(Buffer.from(value));
+                if (!res.writableEnded) res.write(Buffer.from(value));
               }
+            } catch {
+              /* client disconnected mid-stream */
+            } finally {
+              reader.cancel().catch(() => {});
             }
-            res.end();
-          } catch (err) {
-            res.statusCode = 500;
-            res.setHeader('content-type', 'application/json');
-            res.end(
-              JSON.stringify({
-                error: `Dev API error: ${err instanceof Error ? err.message : String(err)}`,
-              })
-            );
           }
-        })();
+          if (!res.writableEnded) res.end();
+        })().catch((err) => fail(err instanceof Error ? err.message : String(err)));
       });
     },
   };
