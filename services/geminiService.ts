@@ -1,86 +1,28 @@
 import { QuizSettings, Question, Option, UserAnswer } from "../types";
 
-const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+// All Gemini calls go through our own serverless function so the API key
+// stays on the server. See api/generate.ts.
+const API = "/api/generate";
 
-function apiKey(): string {
-  const key = (import.meta.env.VITE_GEMINI_API_KEY || "").trim();
-  if (!key) {
-    throw new Error(
-      "No Gemini API key found. Set VITE_GEMINI_API_KEY in your hosting environment (on Vercel: Project Settings -> Environment Variables), then redeploy."
-    );
-  }
-  return key;
+async function postApi(payload: unknown): Promise<Response> {
+  return fetch(API, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
-function model(): string {
-  return import.meta.env.VITE_GEMINI_MODEL || "gemini-flash-latest";
-}
-
-function quizPrompt(settings: QuizSettings): string {
-  const lang = settings.language || "English";
-  return `Generate a ${settings.difficulty} difficulty quiz about "${settings.topic}" with exactly ${settings.count} multiple-choice questions.
-
-Write EVERYTHING (questions, options, reasons, explanations) in ${lang}.
-
-GUIDELINES:
-1. Use very simple, direct ${lang}. Short sentences. Avoid complex words or idioms.
-2. The audience is from India. Use clear and neutral language.
-3. Each question must have exactly 4 options. Exactly ONE option is correct.
-4. For every option set "correct" (true/false) and "reason" = one short sentence saying why that option is right or why it is wrong.
-5. "explanation" = one direct fact about the correct answer.
-6. Do NOT use puns, jokes, or wordplay.
-7. Give each question a unique "id" like "q1", "q2", ...`;
-}
-
-const QUIZ_SCHEMA = {
-  type: "ARRAY",
-  items: {
-    type: "OBJECT",
-    properties: {
-      id: { type: "STRING" },
-      question: { type: "STRING" },
-      options: {
-        type: "ARRAY",
-        items: {
-          type: "OBJECT",
-          properties: {
-            text: { type: "STRING" },
-            correct: { type: "BOOLEAN" },
-            reason: { type: "STRING" },
-          },
-          required: ["text", "correct", "reason"],
-          propertyOrdering: ["text", "correct", "reason"],
-        },
-      },
-      explanation: { type: "STRING" },
-    },
-    required: ["id", "question", "options", "explanation"],
-    propertyOrdering: ["id", "question", "options", "explanation"],
-  },
-} as const;
-
-function requestBody(settings: QuizSettings) {
-  return {
-    contents: [{ parts: [{ text: quizPrompt(settings) }] }],
-    generationConfig: {
-      temperature: 0.7,
-      responseMimeType: "application/json",
-      responseSchema: QUIZ_SCHEMA,
-    },
-  };
-}
-
-function friendlyError(status: number): string {
-  if (status === 400 || status === 401 || status === 403) {
-    return "Gemini rejected the API key. Check VITE_GEMINI_API_KEY.";
+async function readError(res: Response): Promise<string> {
+  try {
+    const data = await res.json();
+    if (data && typeof data.error === "string") return data.error;
+  } catch {
+    /* not JSON */
   }
-  if (status === 404) {
-    return `Model "${model()}" is not available. Set a valid VITE_GEMINI_MODEL.`;
+  if (res.status === 404) {
+    return "The quiz service is not running. Locally, run `vercel dev` or restart the dev server.";
   }
-  if (status === 429) {
-    return "Gemini rate limit hit. Wait a minute and try again.";
-  }
-  return "Something went wrong while making the quiz. Please try again.";
+  return "Could not generate the quiz. Please try again.";
 }
 
 /** Pull every complete top-level `{...}` object out of a growing JSON string. */
@@ -150,7 +92,7 @@ function normalizeQuestion(raw: unknown, index: number): Question | null {
 
   if (options.length < 2) return null;
 
-  let correctCount = options.filter((o) => o.correct).length;
+  const correctCount = options.filter((o) => o.correct).length;
   if (correctCount === 0) {
     const stated = String(r.correctAnswer ?? r.answer ?? "").trim();
     const match = options.find((o) => o.text.trim() === stated);
@@ -173,47 +115,33 @@ function normalizeQuestion(raw: unknown, index: number): Question | null {
   };
 }
 
-/** Non-streaming generation - used as a fallback. */
-export async function generateQuiz(settings: QuizSettings): Promise<Question[]> {
-  const key = apiKey(); // throws a clear "missing key" error before any network work
-  const mdl = model();
-  let response: Response;
-  try {
-    response = await fetch(`${GEMINI_BASE}/${mdl}:generateContent?key=${key}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody(settings)),
-    });
-  } catch {
-    throw new Error("Could not reach Gemini. Check your internet connection.");
-  }
-
-  if (!response.ok) {
-    console.error("Gemini request failed", response.status, await response.text().catch(() => ""));
-    throw new Error(friendlyError(response.status));
-  }
-
-  const data = await response.json();
-  const text: string | undefined =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) {
-    console.error("Empty Gemini response", data);
-    throw new Error("Something went wrong while making the quiz. Please try again.");
-  }
-
+function parseQuizText(text: string): Question[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text.trim());
-  } catch (error) {
-    console.error("Failed to parse quiz JSON", error, text);
-    throw new Error("Something went wrong while making the quiz. Please try again.");
+  } catch {
+    return [];
   }
   const list = Array.isArray(parsed)
     ? parsed
     : ((parsed as Record<string, unknown>)?.questions as unknown[]) ?? [];
-  const questions = list
+  return list
     .map((raw, i) => normalizeQuestion(raw, i))
     .filter((q): q is Question => q !== null);
+}
+
+/** Non-streaming generation - used as a fallback. */
+export async function generateQuiz(settings: QuizSettings): Promise<Question[]> {
+  let res: Response;
+  try {
+    res = await postApi({ mode: "quiz", settings, stream: false });
+  } catch {
+    throw new Error("Could not reach the quiz service. Check your internet connection.");
+  }
+  if (!res.ok) throw new Error(await readError(res));
+
+  const data = await res.json().catch(() => null);
+  const questions = parseQuizText(String(data?.text ?? ""));
   if (questions.length === 0) {
     throw new Error("Something went wrong while making the quiz. Please try again.");
   }
@@ -228,34 +156,23 @@ export async function generateQuiz(settings: QuizSettings): Promise<Question[]> 
 export async function* streamQuiz(
   settings: QuizSettings
 ): AsyncGenerator<Question, void, unknown> {
-  const key = apiKey(); // throws a clear "missing key" error before any network work
-  const mdl = model();
-  let response: Response;
+  let res: Response;
   try {
-    response = await fetch(
-      `${GEMINI_BASE}/${mdl}:streamGenerateContent?alt=sse&key=${key}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody(settings)),
-      }
-    );
+    res = await postApi({ mode: "quiz", settings });
   } catch {
     for (const q of await generateQuiz(settings)) yield q;
     return;
   }
 
-  if (!response.ok || !response.body) {
-    if (response.status && response.status !== 200) {
-      // real API error - surface it
-      console.error("Gemini stream failed", response.status, await response.text().catch(() => ""));
-      throw new Error(friendlyError(response.status));
-    }
+  if (!res.ok) {
+    throw new Error(await readError(res));
+  }
+  if (!res.body) {
     for (const q of await generateQuiz(settings)) yield q;
     return;
   }
 
-  const reader = response.body.getReader();
+  const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let sseBuffer = "";
   let jsonText = "";
@@ -299,7 +216,6 @@ export async function* streamQuiz(
     yield* flush();
   } catch (error) {
     if (yielded === 0) {
-      // streaming broke before producing anything - try the simple path
       for (const q of await generateQuiz(settings)) yield q;
       return;
     }
@@ -317,59 +233,15 @@ export async function generateStudySummary(
   questions: Question[],
   answers: UserAnswer[]
 ): Promise<string> {
-  const lang = settings.language || "English";
-  const wrong = questions.filter((q) => {
-    const a = answers.find((x) => x.questionId === q.id);
-    return !a || !a.isCorrect;
-  });
-
-  const scoreLine = `The learner scored ${answers.filter((a) => a.isCorrect).length} out of ${questions.length}.`;
-  const wrongList =
-    wrong.length === 0
-      ? "The learner answered everything correctly."
-      : wrong
-          .map((q) => {
-            const correct = q.options.find((o) => o.correct);
-            return `- Q: ${q.question}\n  Correct answer: ${correct?.text ?? ""}`;
-          })
-          .join("\n");
-
-  const prompt = `A learner just finished a quiz about "${settings.topic}".
-${scoreLine}
-
-Questions they got wrong:
-${wrongList}
-
-Write a short study summary in ${lang} using very simple language.
-Include:
-1. One line on how they did.
-2. The main sub-topics they should revise.
-3. Exactly 3 key facts to remember, as short bullet points.
-Keep the whole summary under 90 words. Plain text only, no markdown headings.`;
-
-  let response: Response;
+  let res: Response;
   try {
-    response = await fetch(
-      `${GEMINI_BASE}/${model()}:generateContent?key=${apiKey()}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.5 },
-        }),
-      }
-    );
+    res = await postApi({ mode: "summary", settings, questions, answers });
   } catch {
     throw new Error("Could not load the study summary.");
   }
-
-  if (!response.ok) {
-    throw new Error("Could not load the study summary.");
-  }
-  const data = await response.json();
-  const text: string | undefined =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!res.ok) throw new Error("Could not load the study summary.");
+  const data = await res.json().catch(() => null);
+  const text = String(data?.text ?? "").trim();
   if (!text) throw new Error("Could not load the study summary.");
-  return text.trim();
+  return text;
 }
