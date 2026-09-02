@@ -1,7 +1,16 @@
-
 import React from 'react';
 
-const BunnyLoader: React.FC = () => {
+interface BunnyLoaderProps {
+  /** questions produced so far (streaming) */
+  ready?: number;
+  /** questions expected in total */
+  total?: number;
+}
+
+const BunnyLoader: React.FC<BunnyLoaderProps> = ({ ready = 0, total = 0 }) => {
+  const showProgress = total > 0;
+  const pct = showProgress ? Math.min(100, Math.round((ready / total) * 100)) : 0;
+
   return (
     <div className="flex flex-col items-center justify-center space-y-6 p-8 sm:p-12 bg-white rounded-3xl border-2 border-orange-100 w-full max-w-lg mx-auto">
       <div className="relative w-24 h-24 sm:w-32 sm:h-32 animate-bounce">
@@ -16,13 +25,26 @@ const BunnyLoader: React.FC = () => {
       </div>
       <div className="text-center">
         <h3 className="text-xl sm:text-2xl font-bold text-orange-600">Preparing Your Quiz...</h3>
-        <p className="text-orange-400 mt-1 text-sm sm:text-base">Please wait a few seconds</p>
+        <p className="text-orange-400 mt-1 text-sm sm:text-base">
+          {showProgress && ready > 0
+            ? `Ready ${ready} of ${total} questions`
+            : 'Writing your first question'}
+        </p>
       </div>
-      <div className="flex space-x-2">
-        <div className="w-2 h-2 bg-orange-300 rounded-full animate-pulse"></div>
-        <div className="w-2 h-2 bg-orange-400 rounded-full animate-pulse delay-75"></div>
-        <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse delay-150"></div>
-      </div>
+      {showProgress ? (
+        <div className="w-full max-w-xs h-3 bg-orange-50 rounded-full overflow-hidden border border-orange-100">
+          <div
+            className="h-full carrot-gradient transition-all duration-500 ease-out"
+            style={{ width: `${pct}%` }}
+          ></div>
+        </div>
+      ) : (
+        <div className="flex space-x-2">
+          <div className="w-2 h-2 bg-orange-300 rounded-full animate-pulse"></div>
+          <div className="w-2 h-2 bg-orange-400 rounded-full animate-pulse delay-75"></div>
+          <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse delay-150"></div>
+        </div>
+      )}
     </div>
   );
 };
