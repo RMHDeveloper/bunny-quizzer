@@ -3,9 +3,11 @@ import { QuizSettings, Question, Option, UserAnswer } from "../types";
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
 function apiKey(): string {
-  const key = import.meta.env.VITE_GEMINI_API_KEY;
+  const key = (import.meta.env.VITE_GEMINI_API_KEY || "").trim();
   if (!key) {
-    throw new Error("Missing VITE_GEMINI_API_KEY. Set it in .env.local.");
+    throw new Error(
+      "No Gemini API key found. Set VITE_GEMINI_API_KEY in your hosting environment (on Vercel: Project Settings -> Environment Variables), then redeploy."
+    );
   }
   return key;
 }
@@ -173,16 +175,15 @@ function normalizeQuestion(raw: unknown, index: number): Question | null {
 
 /** Non-streaming generation - used as a fallback. */
 export async function generateQuiz(settings: QuizSettings): Promise<Question[]> {
+  const key = apiKey(); // throws a clear "missing key" error before any network work
+  const mdl = model();
   let response: Response;
   try {
-    response = await fetch(
-      `${GEMINI_BASE}/${model()}:generateContent?key=${apiKey()}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody(settings)),
-      }
-    );
+    response = await fetch(`${GEMINI_BASE}/${mdl}:generateContent?key=${key}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody(settings)),
+    });
   } catch {
     throw new Error("Could not reach Gemini. Check your internet connection.");
   }
@@ -227,10 +228,12 @@ export async function generateQuiz(settings: QuizSettings): Promise<Question[]> 
 export async function* streamQuiz(
   settings: QuizSettings
 ): AsyncGenerator<Question, void, unknown> {
+  const key = apiKey(); // throws a clear "missing key" error before any network work
+  const mdl = model();
   let response: Response;
   try {
     response = await fetch(
-      `${GEMINI_BASE}/${model()}:streamGenerateContent?alt=sse&key=${apiKey()}`,
+      `${GEMINI_BASE}/${mdl}:streamGenerateContent?alt=sse&key=${key}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
