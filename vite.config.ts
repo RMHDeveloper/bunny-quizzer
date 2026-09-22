@@ -73,8 +73,9 @@ function apiDevServer(): Plugin {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
   // expose server-side vars to the dev API handler
-  if (env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = env.GEMINI_API_KEY;
   if (env.GEMINI_MODEL) process.env.GEMINI_MODEL = env.GEMINI_MODEL;
+  if (env.DASHBOARD_PROXY_URL) process.env.DASHBOARD_PROXY_URL = env.DASHBOARD_PROXY_URL;
+  if (env.DASHBOARD_PROXY_SECRET) process.env.DASHBOARD_PROXY_SECRET = env.DASHBOARD_PROXY_SECRET;
 
   return {
     server: {

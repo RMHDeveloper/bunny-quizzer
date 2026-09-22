@@ -1,10 +1,13 @@
-// Vercel Edge Function. Keeps the Gemini API key on the server so it never
-// reaches the browser. The client calls POST /api/generate.
+// Vercel Edge Function. Forwards Gemini requests to the shared dashboard
+// proxy so no provider API key needs to live in this app's environment.
+// The client calls POST /api/generate. The dashboard proxy is a JSON-in/
+// JSON-out endpoint (no SSE streaming), so this always requests a
+// non-streaming completion; the client already falls back to non-streaming
+// generation when no response body is present.
 import {
   buildQuizRequestBody,
   buildSummaryRequestBody,
   DEFAULT_MODEL,
-  GEMINI_BASE,
 } from "../lib/gemini";
 
 export const config = { runtime: "edge" };
@@ -18,7 +21,7 @@ function json(body: unknown, status = 200): Response {
 
 function upstreamError(status: number): string {
   if (status === 400 || status === 401 || status === 403) {
-    return "The server's Gemini API key was rejected. Check GEMINI_API_KEY in Vercel.";
+    return "The dashboard proxy rejected the request. Check DASHBOARD_PROXY_SECRET in Vercel.";
   }
   if (status === 404) {
     return "The configured Gemini model is not available. Check GEMINI_MODEL.";
@@ -34,12 +37,13 @@ export default async function handler(req: Request): Promise<Response> {
     return json({ error: "Method not allowed." }, 405);
   }
 
-  const key = (process.env.GEMINI_API_KEY || "").trim();
-  if (!key) {
+  const proxyUrl = (process.env.DASHBOARD_PROXY_URL || "").trim();
+  const proxySecret = (process.env.DASHBOARD_PROXY_SECRET || "").trim();
+  if (!proxyUrl || !proxySecret) {
     return json(
       {
         error:
-          "The server is missing GEMINI_API_KEY. Add it in Vercel -> Settings -> Environment Variables, then redeploy.",
+          "The server is missing DASHBOARD_PROXY_URL or DASHBOARD_PROXY_SECRET. Add them in Vercel -> Settings -> Environment Variables, then redeploy.",
       },
       500
     );
@@ -59,21 +63,25 @@ export default async function handler(req: Request): Promise<Response> {
     return json({ error: "Invalid request body." }, 400);
   }
 
+  const callProxy = async (requestBody: Record<string, unknown>) => {
+    return fetch(`${proxyUrl}/api/proxy/bunny-quizzer`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-proxy-secret": proxySecret,
+      },
+      body: JSON.stringify({ model, ...requestBody }),
+    });
+  };
+
   try {
     if (body.mode === "summary") {
-      const upstream = await fetch(
-        `${GEMINI_BASE}/${model}:generateContent?key=${key}`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(
-            buildSummaryRequestBody(
-              body.settings as never,
-              (body.questions ?? []) as never,
-              (body.answers ?? []) as never
-            )
-          ),
-        }
+      const upstream = await callProxy(
+        buildSummaryRequestBody(
+          body.settings as never,
+          (body.questions ?? []) as never,
+          (body.answers ?? []) as never
+        )
       );
       if (!upstream.ok) return json({ error: upstreamError(upstream.status) }, 502);
       const data = await upstream.json();
@@ -82,38 +90,21 @@ export default async function handler(req: Request): Promise<Response> {
       return json({ text });
     }
 
-    // default: quiz generation
+    // default: quiz generation (always non-streaming through the dashboard proxy)
     if (!body.settings || !body.settings.topic) {
       return json({ error: "Missing quiz settings." }, 400);
     }
-    const wantStream = body.stream !== false;
-    const method = wantStream ? "streamGenerateContent?alt=sse&" : "generateContent?";
-    const upstream = await fetch(`${GEMINI_BASE}/${model}:${method}key=${key}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(buildQuizRequestBody(body.settings as never)),
-    });
+    const upstream = await callProxy(buildQuizRequestBody(body.settings as never));
 
-    if (!upstream.ok || !upstream.body) {
+    if (!upstream.ok) {
       const status = upstream.status >= 400 ? upstream.status : 502;
       return json({ error: upstreamError(upstream.status) }, status);
-    }
-
-    if (wantStream) {
-      return new Response(upstream.body, {
-        status: 200,
-        headers: {
-          "content-type": "text/event-stream; charset=utf-8",
-          "cache-control": "no-cache, no-transform",
-          "x-accel-buffering": "no",
-        },
-      });
     }
 
     const data = await upstream.json();
     const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
     return json({ text });
   } catch {
-    return json({ error: "The server could not reach Gemini." }, 502);
+    return json({ error: "The server could not reach the dashboard proxy." }, 502);
   }
 }
